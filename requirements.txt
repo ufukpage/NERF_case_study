@@ -1,0 +1,6 @@
+kornia==0.6.7
+matplotlib==3.6.0
+opencv-python==4.6.0.66
+pip-chill==1.0.1
+torchsearchsorted==1.1
+torchvision==0.13.1
