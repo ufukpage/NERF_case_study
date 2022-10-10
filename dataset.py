@@ -1,11 +1,12 @@
-import torch
-from torch.utils.data import Dataset
 import json
-import numpy as np
 import os
+
+import numpy as np
+import torch
 from PIL import Image
-from torchvision import transforms as T
 from kornia import create_meshgrid
+from torch.utils.data import Dataset
+from torchvision import transforms as T
 
 
 def get_ray_directions(H, W, focal):
@@ -25,7 +26,7 @@ def get_ray_directions(H, W, focal):
     # the direction here is without +0.5 pixel centering as calibration is not so accurate
     # see https://github.com/bmild/nerf/issues/24
     directions = \
-        torch.stack([(i-W/2)/focal, -(j-H/2)/focal, -torch.ones_like(i)], -1) # (H, W, 3)
+        torch.stack([(i - W / 2) / focal, -(j - H / 2) / focal, -torch.ones_like(i)], -1)  # (H, W, 3)
 
     return directions
 
@@ -45,9 +46,9 @@ def get_rays(directions, c2w):
         rays_d: (H*W, 3), the direction of the rays in world coordinate
     """
     # Rotate ray directions from camera coordinate to the world coordinate
-    rays_d = directions @ c2w[:3, :3].T # (H, W, 3)
+    rays_d = directions @ c2w[:3, :3].T  # (H, W, 3)
     # The origin of all rays is the camera origin in world coordinate
-    rays_o = c2w[:3, 3].expand(rays_d.shape) # (H, W, 3)
+    rays_o = c2w[:3, 3].expand(rays_d.shape)  # (H, W, 3)
 
     rays_d = rays_d.view(-1, 3)
     rays_o = rays_o.view(-1, 3)
@@ -77,25 +78,25 @@ def get_ndc_rays(H, W, focal, near, rays_o, rays_d):
         rays_d: (N_rays, 3), the direction of the rays in NDC
     """
     # Shift ray origins to near plane
-    t = -(near + rays_o[...,2]) / rays_d[...,2]
-    rays_o = rays_o + t[...,None] * rays_d
+    t = -(near + rays_o[..., 2]) / rays_d[..., 2]
+    rays_o = rays_o + t[..., None] * rays_d
 
     # Store some intermediate homogeneous results
-    ox_oz = rays_o[...,0] / rays_o[...,2]
-    oy_oz = rays_o[...,1] / rays_o[...,2]
+    ox_oz = rays_o[..., 0] / rays_o[..., 2]
+    oy_oz = rays_o[..., 1] / rays_o[..., 2]
 
     # Projection
-    o0 = -1./(W/(2.*focal)) * ox_oz
-    o1 = -1./(H/(2.*focal)) * oy_oz
-    o2 = 1. + 2. * near / rays_o[...,2]
+    o0 = -1. / (W / (2. * focal)) * ox_oz
+    o1 = -1. / (H / (2. * focal)) * oy_oz
+    o2 = 1. + 2. * near / rays_o[..., 2]
 
-    d0 = -1./(W/(2.*focal)) * (rays_d[...,0]/rays_d[...,2] - ox_oz)
-    d1 = -1./(H/(2.*focal)) * (rays_d[...,1]/rays_d[...,2] - oy_oz)
+    d0 = -1. / (W / (2. * focal)) * (rays_d[..., 0] / rays_d[..., 2] - ox_oz)
+    d1 = -1. / (H / (2. * focal)) * (rays_d[..., 1] / rays_d[..., 2] - oy_oz)
     d2 = 1 - o2
-    
-    rays_o = torch.stack([o0, o1, o2], -1) # (B, 3)
-    rays_d = torch.stack([d0, d1, d2], -1) # (B, 3)
-    
+
+    rays_o = torch.stack([o0, o1, o2], -1)  # (B, 3)
+    rays_d = torch.stack([d0, d1, d2], -1)  # (B, 3)
+
     return rays_o, rays_d
 
 
@@ -115,20 +116,20 @@ class CustomDataset(Dataset):
                                f"transforms_{self.split}.json"), 'r') as f:
             self.meta = json.load(f)
 
-        self.focal = 0.5*800/np.tan(0.5*self.meta['camera_angle_x']) # original focal length
-                                                                     # when W=800
+        self.focal = 0.5 * 800 / np.tan(0.5 * self.meta['camera_angle_x'])  # original focal length
+        # when W=800
 
-        self.focal *= self.img_wh[0]/800 # modify focal length to match size self.img_wh
+        self.focal *= self.img_wh[0] / 800  # modify focal length to match size self.img_wh
 
         # bounds, common for all scenes
         self.near = 2.0
         self.far = 6.0
-        
+
         # ray directions for all pixels, same for all images (same H, W, focal)
         self.directions = \
-            get_ray_directions(self.img_wh[1], self.img_wh[0], self.focal) # (H, W, 3)
-            
-        if self.split == 'train': # create buffer of all rays and rgb data
+            get_ray_directions(self.img_wh[1], self.img_wh[0], self.focal)  # (H, W, 3)
+
+        if self.split == 'train':  # create buffer of all rays and rgb data
             self.all_rays = []
             self.all_rgbs = []
             self.valid_masks = []
@@ -137,23 +138,23 @@ class CustomDataset(Dataset):
 
                 img = Image.open(os.path.join(self.root_dir, f"{frame['file_path']}.png"))
                 img = img.resize(self.img_wh)
-                img = self.transform(img) # (4, H, W)
-                valid_mask = (img[-1]>0).flatten() # (H*W) valid color area
+                img = self.transform(img)  # (4, H, W)
+                valid_mask = (img[-1] > 0).flatten()  # (H*W) valid color area
                 self.valid_masks += [valid_mask]
-                img = img.view(4, -1).permute(1, 0) # (H*W, 4) RGBA
-                img = img[:, :3]*img[:, -1:] + (1-img[:, -1:]) # blend A to RGB
+                img = img.view(4, -1).permute(1, 0)  # (H*W, 4) RGBA
+                img = img[:, :3] * img[:, -1:] + (1 - img[:, -1:])  # blend A to RGB
                 self.all_rgbs += [img]
-                
-                rays_o, rays_d = get_rays(self.directions, c2w) # both (H*W, 3)
 
-                self.all_rays += [torch.cat([rays_o, rays_d, 
-                                             self.near*torch.ones_like(rays_o[:, :1]),
-                                             self.far*torch.ones_like(rays_o[:, :1])],
-                                             1)] # (H*W, 8)
+                rays_o, rays_d = get_rays(self.directions, c2w)  # both (H*W, 3)
 
-            self.all_rays = torch.cat(self.all_rays, 0) # (len(self.meta['frames])*H*W, 3)
-            self.all_rgbs = torch.cat(self.all_rgbs, 0) # (len(self.meta['frames])*H*W, 3)
-            self.valid_masks = torch.cat(self.valid_masks, 0) # (len(self.meta['frames])*H*W)
+                self.all_rays += [torch.cat([rays_o, rays_d,
+                                             self.near * torch.ones_like(rays_o[:, :1]),
+                                             self.far * torch.ones_like(rays_o[:, :1])],
+                                            1)]  # (H*W, 8)
+
+            self.all_rays = torch.cat(self.all_rays, 0)  # (len(self.meta['frames])*H*W, 3)
+            self.all_rgbs = torch.cat(self.all_rgbs, 0)  # (len(self.meta['frames])*H*W, 3)
+            self.valid_masks = torch.cat(self.valid_masks, 0)  # (len(self.meta['frames])*H*W)
 
     def define_transforms(self):
         self.transform = T.ToTensor()
@@ -167,31 +168,31 @@ class CustomDataset(Dataset):
         if self.split == 'train':
             return len(self.all_rays)
         if self.split == 'val':
-            return 1 # only validate one image
+            return 1  # only validate one image
         return len(self.meta['frames'])
 
     def __getitem__(self, idx):
-        if self.split == 'train': # use data in the buffers
+        if self.split == 'train':  # use data in the buffers
             sample = {'rays': self.all_rays[idx],
                       'rgbs': self.all_rgbs[idx]}
 
-        else: # create data for each image separately
+        else:  # create data for each image separately
             frame = self.meta['frames'][idx]
             c2w = torch.FloatTensor(frame['transform_matrix'])[:3, :4]
 
             img = Image.open(os.path.join(self.root_dir, f"{frame['file_path']}.png"))
             img = img.resize(self.img_wh, Image.LANCZOS)
-            img = self.transform(img) # (4, H, W)
-            valid_mask = (img[-1]>0).flatten() # (H*W) valid color area
-            img = img.view(4, -1).permute(1, 0) # (H*W, 4) RGBA
-            img = img[:, :3]*img[:, -1:] + (1-img[:, -1:]) # blend A to RGB
+            img = self.transform(img)  # (4, H, W)
+            valid_mask = (img[-1] > 0).flatten()  # (H*W) valid color area
+            img = img.view(4, -1).permute(1, 0)  # (H*W, 4) RGBA
+            img = img[:, :3] * img[:, -1:] + (1 - img[:, -1:])  # blend A to RGB
 
             rays_o, rays_d = get_rays(self.directions, c2w)
 
-            rays = torch.cat([rays_o, rays_d, 
-                              self.near*torch.ones_like(rays_o[:, :1]),
-                              self.far*torch.ones_like(rays_o[:, :1])],
-                              1) # (H*W, 8)
+            rays = torch.cat([rays_o, rays_d,
+                              self.near * torch.ones_like(rays_o[:, :1]),
+                              self.far * torch.ones_like(rays_o[:, :1])],
+                             1)  # (H*W, 8)
 
             sample = {'rays': rays,
                       'rgbs': img,
