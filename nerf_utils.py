@@ -28,8 +28,8 @@ def nerf_forward(pts, viewdirs, network, netchunk=1024 * 64):
     return torch.reshape(outputs_flat, list(pts.shape[:-1]) + [outputs_flat.shape[-1]])
 
 
-def raw2outputs(raw, z_vals, rays_d):
-    """Transforms model's predictions to semantically meaningful values.
+def volumetric_render(raw, z_vals, rays_d):
+    """
     Args:
         raw: [num_rays, num_samples along ray, 4]. Prediction from model.
         z_vals: [num_rays, num_samples along ray]. Integration time.
@@ -52,24 +52,26 @@ def raw2outputs(raw, z_vals, rays_d):
     rgb = torch.sigmoid(raw[..., :3])  # [N_rays, N_samples, 3] # get rgb values for each 3D point
 
     dists = dists.to(raw.device)
-    alpha = raw2alpha(raw[..., 3], dists)  # [N_rays, N_samples] # get alpha value or DENSITY for each 3D point
+    density = raw2alpha(raw[..., 3], dists)  # [N_rays, N_samples] # get alpha value or DENSITY for each 3D point
 
-    weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1), device=alpha.device), 1. - alpha + 1e-10]
-                                              , -1), -1)[:, :-1]
+    # we use minus 1 to precent effect of 1 in density variabla
+    # cumprod provides us transparancy and volume summation together
+    transparancy = torch.cumprod(torch.cat(
+        [torch.ones((density.shape[0], 1), device=density.device), 1. - density + 1e-10], -1), -1)
+    weights = density * transparancy[:, :-1]
     rgb_map = torch.sum(weights[..., None] * rgb, -2)  # [N_rays, 3]
 
     z_vals = z_vals.to(weights.device)
     depth_map = torch.sum(weights * z_vals, -1)
     acc_map = torch.sum(weights, -1)
 
-    # if white_bkgd:
     rgb_map = rgb_map + (1. - acc_map[..., None])
 
     return rgb_map, acc_map, weights, depth_map
 
 
 # Hierarchical sampling (section 5.2)
-def sample_pdf(bins, weights, N_samples, det=False, pytest=False):
+def sample_pdf(bins, weights, N_samples, det=False):
     # Get pdf
     weights = weights + 1e-5  # prevent nans
     pdf = weights / torch.sum(weights, -1, keepdim=True)
@@ -83,17 +85,6 @@ def sample_pdf(bins, weights, N_samples, det=False, pytest=False):
     else:
         u = torch.rand(list(cdf.shape[:-1]) + [N_samples])
 
-    # Pytest, overwrite u with numpy's fixed random numbers
-    if pytest:
-        np.random.seed(0)
-        new_shape = list(cdf.shape[:-1]) + [N_samples]
-        if det:
-            u = np.linspace(0., 1., N_samples)
-            u = np.broadcast_to(u, new_shape)
-        else:
-            u = np.random.rand(*new_shape)
-        u = torch.Tensor(u)
-
     # Invert CDF
     u = u.contiguous().to(cdf.device)
     inds = torch.searchsorted(cdf, u, right=True)
@@ -101,8 +92,6 @@ def sample_pdf(bins, weights, N_samples, det=False, pytest=False):
     above = torch.min((cdf.shape[-1] - 1) * torch.ones_like(inds), inds)
     inds_g = torch.stack([below, above], -1)  # (batch, N_samples, 2)
 
-    # cdf_g = tf.gather(cdf, inds_g, axis=-1, batch_dims=len(inds_g.shape)-2)
-    # bins_g = tf.gather(bins, inds_g, axis=-1, batch_dims=len(inds_g.shape)-2)
     matched_shape = [inds_g.shape[0], inds_g.shape[1], cdf.shape[-1]]
     cdf_g = torch.gather(cdf.unsqueeze(1).expand(matched_shape), 2, inds_g)
     bins_g = torch.gather(bins.unsqueeze(1).expand(matched_shape).to(inds_g.device), 2, inds_g)
@@ -122,37 +111,22 @@ def render_rays(ray_batch,
                 retraw=False,
                 lindisp=False,
                 perturb=0.,
-                white_bkgd=False,
                 pytest=False):
     """Volumetric rendering.
     Args:
       ray_batch: array of shape [batch_size, ...]. All information necessary
         for sampling along a ray, including: ray origin, ray direction, min
         dist, max dist, and unit-magnitude viewing direction.
-      network_fn: function. Model for predicting RGB and density at each point
-        in space.
-      network_query_fn: function used for passing queries to network_fn.
       N_samples: int. Number of different times to sample along each ray.
-      retraw: bool. If True, include model's raw, unprocessed predictions.
-      lindisp: bool. If True, sample linearly in inverse depth rather than in depth.
+
       perturb: float, 0 or 1. If non-zero, each ray is sampled at stratified
         random points in time.
       N_importance: int. Number of additional times to sample along each ray.
         These samples are only passed to network_fine.
-      network_fine: "fine" network with same spec as network_fn.
-      white_bkgd: bool. If True, assume a white background.
-      raw_noise_std: ...
-      verbose: bool. If True, print more debugging info.
     Returns:
       rgb_map: [num_rays, 3]. Estimated RGB color of a ray. Comes from fine model.
       disp_map: [num_rays]. Disparity map. 1 / depth.
       acc_map: [num_rays]. Accumulated opacity along each ray. Comes from fine model.
-      raw: [num_rays, num_samples, 4]. Raw predictions from model.
-      rgb0: See rgb_map. Output for coarse model.
-      disp0: See disp_map. Output for coarse model.
-      acc0: See acc_map. Output for coarse model.
-      z_std: [num_rays]. Standard deviation of distances along ray for each
-        sample.
     """
     N_rays = ray_batch.shape[0]
     rays_o, rays_d = ray_batch[:, 0:3], ray_batch[:, 3:6]  # [N_rays, 3] each
@@ -191,16 +165,17 @@ def render_rays(ray_batch,
     raw = nerf_forward(pts, viewdirs, models[0])
 
     z_vals = z_vals.to(raw.device)
-    rgb_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d)
+    rgb_map, acc_map, weights, depth_map = volumetric_render(raw, z_vals, rays_d)
 
     # importance sampling
     if N_importance > 0:
-        rgb_map_0, acc_map_0 = rgb_map, acc_map
 
         z_vals_mid = .5 * (z_vals[..., 1:] + z_vals[..., :-1])
+        # sample fine depth points
         z_samples = sample_pdf(z_vals_mid, weights[..., 1:-1], N_importance, det=(perturb == 0.), pytest=pytest)
         z_samples = z_samples.detach()
 
+        # gather coarse and fine depth points and sort
         z_vals, _ = torch.sort(torch.cat([z_vals, z_samples], -1), -1)
 
         # sample new points with respect to new z_vals
@@ -210,15 +185,11 @@ def render_rays(ray_batch,
 
         raw = nerf_forward(pts, viewdirs, models[1])
 
-        rgb_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d)
+        rgb_map, acc_map, weights, depth_map = volumetric_render(raw, z_vals, rays_d)
 
     ret = {'rgb_fine': rgb_map, 'depth_fine': depth_map, 'opacity_fine': acc_map}
     if retraw:
         ret['raw'] = raw
-    if N_importance > 0:
-        ret['rgb0'] = rgb_map_0
-        ret['acc0'] = acc_map_0
-        ret['z_std'] = torch.std(z_samples, dim=-1, unbiased=False)  # [N_rays]
 
     for k in ret:
         if (torch.isnan(ret[k]).any() or torch.isinf(ret[k]).any()) and DEBUG:

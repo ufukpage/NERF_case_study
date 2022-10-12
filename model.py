@@ -83,14 +83,7 @@ class NeRF(nn.Module):
         self.funcs = [torch.sin, torch.cos]
         self.cam_embedder = get_embedder(N_freqs, logscale, self.funcs, in_channels)
 
-        """"
-        self.N_freqs = N_freqs
-        self.out_channels = in_channels * (len(self.funcs) * N_freqs + 1)
-        self.freq_bands = NeRF.init_positional_encoding(logscale, N_freqs)
-        """
-
         if self.d_viewdirs is not None:
-            # self.freq_bands_view = NeRF.init_positional_encoding(logscale, self.d_viewdirs)
             self.viewdir_embedder = get_embedder(self.d_viewdirs, logscale, self.funcs, in_channels)
             self.rgb_filters = nn.Linear(d_filter, d_filter)
             self.branch = nn.Linear(d_filter + 27, d_filter // 2)
@@ -98,21 +91,6 @@ class NeRF(nn.Module):
             self.output = nn.Linear(d_filter // 2, 3)
         else:
             self.output = nn.Linear(d_filter, 4)
-
-    @staticmethod
-    def init_positional_encoding(logscale, N_freqs):
-        if logscale:
-            freq_bands = 2 ** torch.linspace(0, N_freqs - 1, N_freqs)
-        else:
-            freq_bands = torch.linspace(1, 2 ** (N_freqs - 1), N_freqs)
-        return freq_bands
-
-    def apply_positional_encoding(self, x, freq_bands):
-        out = []
-        for freq in freq_bands:
-            for func in self.funcs:
-                out += [func(freq * x)]
-        return out
 
     def forward(
         self,
@@ -127,10 +105,6 @@ class NeRF(nn.Module):
 
         if self.d_viewdirs is None and viewdirs is not None:
             raise ValueError('Cannot input x_direction if d_viewdirs was not given.')
-
-        # out = [cam_positions]
-        # out += self.apply_positional_encoding(cam_positions, self.freq_bands)
-        # input_ = torch.cat(out, -1)
 
         # Embed camera position
         input_ = self.cam_embedder(pts)

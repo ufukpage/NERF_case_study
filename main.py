@@ -59,10 +59,9 @@ def render(rays, chunk=1024 * 32, **kwargs):
          rays: (N_rays, 11), Ray origin and direction
 
        Returns:
-         rgb_map: [batch_size, 3]. Predicted RGB values for rays.
-         disp_map: [batch_size]. Disparity map. Inverse of depth.
-         acc_map: [batch_size]. Accumulated opacity (alpha) along a ray.
-         extras: dict with everything returned by render_rays().
+         rgb_fine: Predicted RGB values for rays.
+         opacity_fine: Disparity map. Inverse of depth.
+         depth_fine: Accumulated opacity (alpha) along a ray.
        """
     # viewing direction
     rays_d = rays[:, 3:6]
